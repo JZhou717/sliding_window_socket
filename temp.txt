@@ -18,10 +18,7 @@ send_port = 0
 recv_port = 0
 
 # The max packet size we will use. 60,000 bytes of data
-MAX_PACKET_SIZE = 60000
-
-# The size of our receiving buffer window. 262,000 bytes of data
-MAX_BUFFER_SIZE = 262000
+max_packet_size = 60000
 
 # For when we need a lock while multi-threading
 mutex = Lock()
@@ -55,12 +52,6 @@ class socket:
         self.timed_out = False
         # Counter to see how many bytes we sent in send
         self.bytes_sent = 0
-        # Where we store data that we are receiving
-        self.buffer = b''
-        # The size of the available space in the buffer
-        self.available_buffer = MAX_BUFFER_SIZE
-        # Expected sequence number of the next byte to receive
-        self.exp_seq_no = 0
 
         print('sock352 Socket created!')
 
@@ -129,7 +120,7 @@ class socket:
 
         while client_syn_packed_packet is None\
                 and client_addr is None:
-            (client_syn_packed_packet, client_addr) = self.udp_socket.recvfrom(MAX_PACKET_SIZE + 40)
+            (client_syn_packed_packet, client_addr) = self.udp_socket.recvfrom(max_packet_size + 40)
 
         # Save the address we would send to as server
         self.sending_addr = client_addr[0]
@@ -214,8 +205,8 @@ class socket:
         packet_seq_no = 0
         while remainder > 0:
             # Biting off a chunk for this packet
-            segment = buffer[:MAX_PACKET_SIZE]
-            buffer = buffer[MAX_PACKET_SIZE:]
+            segment = buffer[:max_packet_size]
+            buffer = buffer[max_packet_size:]
             # Creating a packet from this chunk and add it to the list
             new_packet = Packet(0x00, packet_seq_no, 0, len(segment), segment)
             self.remaining_packets.append(new_packet)
@@ -233,37 +224,35 @@ class socket:
 
     def recv(self, nbytes):
 
-        while len(self.buffer) < nbytes:
+        # The data that we are returning
+        buffer = b''
+        # Remaining bytes that we expect to receive
+        remainder = nbytes
+        # Expected sequence number of the next byte to receive
+        exp_seq_no = 0
+
+        while remainder > 0:
             # Receive a packet
             packet = self.recv_packet()
             # Check if this is the packet we are expecting or if we dropped one
-            if packet.sequence_no == self.exp_seq_no:
+            if packet.sequence_no == exp_seq_no:
                 print(f'Received packet with sequence number: {packet.sequence_no}')
 
                 # Increase the expected sequence number to be the next expected sequence number. Also the ack no
-                self.exp_seq_no += packet.payload_len
+                exp_seq_no += packet.payload_len
                 # Add packet payload to our buffer
-                self.buffer += packet.data
-                # Decrease the size that we have in the buffer
-                self.available_buffer -= packet.payload_len
+                buffer += packet.data
 
                 # Send ACK for packet
-                # We will use the sequence number field to indicate remaining buffer size
-                # We will use the ack number field to indicate next expected byte
-                ack_packet = Packet(SOCK352_ACK, self.available_buffer, self.exp_seq_no, 0, b'').pack_self()
+                # We will use the sequence number field of this ACK packet to indicate how many bytes we received
+                ack_packet = Packet(SOCK352_ACK, 0, exp_seq_no, 0, b'').pack_self()
                 self.udp_socket.sendto(ack_packet, (self.sending_addr, send_port))
 
-        # Taking chunk of requested data to return
-        chunk = self.buffer[:nbytes]
-        self.buffer = self.buffer[nbytes:]
-        self.available_buffer += nbytes
+                # Subtract the amount received from remainder
+                remainder -= packet.payload_len
 
-        # Send ack with updated window size
-        window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, self.exp_seq_no, 0, b'').pack_self()
-        self.udp_socket.sendto(window_ack_packet, (self.sending_addr, send_port))
-
-        # Returning requested data
-        return chunk
+        print('Server received the full transmission')
+        return buffer
 
     # Sends all packets in the argument list
     def send_all_packets(self):
@@ -330,7 +319,7 @@ class socket:
 
     # Calls a UDP recvfrom and Returns a Packet from the data received
     def recv_packet(self):
-        (struct_packet, recv_addr) = self.udp_socket.recvfrom(MAX_PACKET_SIZE + 40)
+        (struct_packet, recv_addr) = self.udp_socket.recvfrom(max_packet_size + 40)
         # Unpacking header
         overhead = struct.unpack_from('!BBBBHHLLQQLL', struct_packet[:40])
         flags = overhead[1]
