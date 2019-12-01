@@ -175,34 +175,6 @@ class socket:
 
         return self, client_addr
 
-    # Two way double handshake to tear this bad boy down
-    def close(self):  # fill in your code here
-
-        # We'll give the sockets 2 seconds to close. If something goes wrong, reattempt both sides to close
-        self.udp_socket.settimeout(2)
-
-        # Each side does a single handshake. Send FIN and receive ACK
-        # Close behaves differently for active close and passive close
-        server_closed = False
-        client_closed = False
-
-        while (not server_closed) and (not client_closed):
-            try:
-                # This is only true as the server. Server is passive close
-                if self.server_connected:
-                    server_closed = self.passive_close()
-                else:
-                    client_closed = self.active_close()
-            except syssock.timeout:
-                print('Sockets timed out during close. Reattempting close')
-                pass
-
-        # Good to close down
-        self.udp_socket.close()
-        print('Connection Closed')
-
-        return
-
     def send(self, buffer):
 
         # No bytes sent yet for this send call
@@ -224,12 +196,89 @@ class socket:
             remainder -= len(segment)
             print(f'File segment {new_packet.sequence_no} created')
 
-        # Keep sending all the remaining packets until none left
-        # On timeout, meaning missing ACK, just resend all packets
+        # Keep sending streams of remaining packets until none left
+        # Streams will not send until there is room in the receiving buffer
         while len(self.remaining_packets) > 0:
-            self.send_all_packets()
+            self.send_stream()
 
         return self.bytes_sent
+
+    # Sends packets that will fit in the window
+    def send_stream(self):
+
+        print('client sending stream of packets')
+        # List of our threads
+        thread_list = []
+
+        # Get a new window size if we can't send a single packet
+        while self.remaining_packets[0].payload_len > self.available_buffer:
+            try:
+                packet = self.recv_packet()
+                self.available_buffer = packet.sequence_no
+            except syssock.timeout:
+                pass
+
+        # index to keep track of the packets we are sending
+        index = 0
+
+        # Keep sending packets that would fit in the receiver window
+        while self.remaining_packets[index] is not None and \
+                self.remaining_packets[index].payload_len < self.available_buffer:
+            packet = self.remaining_packets[index]
+            # If we have timed out. Stop sending packets. Reading in mutex so we are sure of the state
+            # send_stream() will be called again when send() sees there are remaining packets
+            with mutex:
+                if self.timed_out:
+                    break
+
+            print(f'Sending packet with sequence number: {packet.sequence_no}')
+            self.udp_socket.sendto(packet.pack_self(), (self.sending_addr, send_port))
+            # Create a new thread to start the ACK timer
+            ack_thread = Thread(target=self.recv_ack, args=())
+            thread_list.append(ack_thread)
+            ack_thread.start()
+            # updating the window size with lock just in case one of the threads access it first
+            with mutex:
+                self.available_buffer -= packet.payload_len
+
+            index += 1
+
+        # Ensuring we will have no zombie threads
+        for thread in thread_list:
+            thread.join()
+
+        # Resetting time out flag
+        self.timed_out = False
+
+        return
+
+    # This called every time a packet is sent. Will throw timeout that is caught before send_all_packets
+    def recv_ack(self):
+        # No need to run if we have already timed out on another thread. Reading with mutex to ensure true state
+        with mutex:
+            if self.timed_out:
+                return
+        # try to recv ACK until we timeout
+        try:
+            ack_packet = self.recv_packet()
+        except syssock.timeout:
+            # Letting socket know we timed out on recv
+            with mutex:
+                # Only need to do this if another thread has not already reported timeout
+                if self.timed_out is False:
+                    print('Socket timed out. Resending remaining unacked packets')
+                    self.timed_out = True
+            # Ending this thread
+            return
+
+        # Locking while we update the list and number of bytes sent and the available window size
+        with mutex:
+            if ack_packet.ack_no == self.remaining_packets[0].sequence_no + MAX_PACKET_SIZE:
+                del self.remaining_packets[0]
+                self.bytes_sent = ack_packet.ack_no
+            self.available_buffer = ack_packet.sequence_no
+        print(f'Received ACK for {self.bytes_sent} bytes')
+        return
 
     def recv(self, nbytes):
 
@@ -265,69 +314,6 @@ class socket:
         # Returning requested data
         return chunk
 
-    # Sends all packets in the argument list
-    def send_all_packets(self):
-
-        print('client sending all remaining packets')
-        # List of our threads
-        thread_list = []
-
-        #
-        for packet in self.remaining_packets:
-            # If we have timed out. Stop sending remaining packets. Reading in mutex so we are sure of the state
-            # send_all_packets() will be called again when send() sees there are remaining packets
-            with mutex:
-                if self.timed_out:
-                    break
-
-            # This is to drop packets. Remove before submission
-            # rand = random.randint(1, 100)
-            # if rand <= 20:
-            #     print('packet dropped')
-            #     continue
-
-            print(f'Sending packet with sequence number: {packet.sequence_no}')
-            self.udp_socket.sendto(packet.pack_self(), (self.sending_addr, send_port))
-            # Create a new thread to start the ACK timer
-            ack_thread = Thread(target=self.recv_ack, args=())
-            thread_list.append(ack_thread)
-            ack_thread.start()
-
-        # Ensuring we will have no zombie threads
-        for thread in thread_list:
-            thread.join()
-
-        # Resetting time out flag
-        self.timed_out = False
-
-        return
-
-    # This called every time a packet is sent. Will throw timeout that is caught before send_all_packets
-    def recv_ack(self):
-        # No need to run if we have already timed out on another thread. Reading with mutex to ensure true state
-        with mutex:
-            if self.timed_out:
-                return
-        # try to recv ACK until we timeout
-        try:
-            ack_packet = self.recv_packet()
-        except syssock.timeout:
-            # Letting socket know we timed out on recv
-            with mutex:
-                # Only need to do this if another thread has not already reported timeout
-                if self.timed_out is False:
-                    print('Socket timed out. Resending remaining unacked packets')
-                    self.timed_out = True
-            # Ending this thread
-            return
-
-        # Locking while we update the list and number of bytes sent
-        with mutex:
-            del self.remaining_packets[0]
-            self.bytes_sent = ack_packet.ack_no
-        print(f'Received ACK for {self.bytes_sent} bytes')
-        return
-
     # Calls a UDP recvfrom and Returns a Packet from the data received
     def recv_packet(self):
         (struct_packet, recv_addr) = self.udp_socket.recvfrom(MAX_PACKET_SIZE + 40)
@@ -341,6 +327,34 @@ class socket:
         data = struct.unpack_from(str(payload_len) + 's', struct_packet[40:])[0]
 
         return Packet(flags, sequence_no, ack_no, payload_len, data)
+
+    # Two way double handshake to tear this bad boy down
+    def close(self):  # fill in your code here
+
+        # We'll give the sockets 2 seconds to close. If something goes wrong, reattempt both sides to close
+        self.udp_socket.settimeout(2)
+
+        # Each side does a single handshake. Send FIN and receive ACK
+        # Close behaves differently for active close and passive close
+        server_closed = False
+        client_closed = False
+
+        while (not server_closed) and (not client_closed):
+            try:
+                # This is only true as the server. Server is passive close
+                if self.server_connected:
+                    server_closed = self.passive_close()
+                else:
+                    client_closed = self.active_close()
+            except syssock.timeout:
+                print('Sockets timed out during close. Reattempting close')
+                pass
+
+        # Good to close down
+        self.udp_socket.close()
+        print('Connection Closed')
+
+        return
 
     # Active close is the one who first initiates the close. It is the client in the case of sock352
     def active_close(self):
