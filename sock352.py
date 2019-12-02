@@ -204,20 +204,11 @@ class socket:
         while len(self.remaining_packets) > 0:
             self.send_stream()
 
-        # We want to clear out the link for the final ACK for new window size before next call
-        try:
-            print(f'\nChecking for ACK with available buffer')
-            self.recv_ack()
-        except syssock.timeout:
-            print('\nTimed out while waiting for buffer size')
-            pass
-
         return self.bytes_sent
 
     # Sends packets that will fit in the window
     def send_stream(self):
 
-        print('client sending stream of packets')
         # List of our threads
         thread_list = []
 
@@ -227,10 +218,8 @@ class socket:
         else:
             # Get a new window size if we can't send a single packet
             try:
-                print(f'\nChecking for ACK with available buffer')
                 self.recv_ack()
             except syssock.timeout:
-                print('\nTimed out while waiting for buffer size')
                 pass
 
         # index to keep track of the packets we are sending
@@ -246,7 +235,6 @@ class socket:
             # send_stream() will be called again when send() sees there are remaining packets
             with mutex:
                 if self.timed_out:
-                    print(f'packet dropped. Timed out on ACK')
                     break
 
             print(f'Sending packet with sequence number: {packet.sequence_no}')
@@ -268,7 +256,6 @@ class socket:
         # Resetting time out flag
         self.timed_out = False
 
-        print('\nEnd of send stream')
         return
 
     # This called every time a packet is sent. Will throw timeout that is caught before send_all_packets
@@ -281,7 +268,6 @@ class socket:
         try:
             ack_packet = self.recv_packet()
         except syssock.timeout:
-            print("ACK thread timed out")
             # Letting socket know we timed out on recv
             with mutex:
                 # Only need to do this if another thread has not already reported timeout
@@ -294,7 +280,6 @@ class socket:
         # Locking while we update the list and number of bytes sent and the available window size
         with mutex:
             while len(self.remaining_packets) > 0 and ack_packet.ack_no > self.remaining_packets[0].sequence_no:
-                print(f'Removing packet from list of packets to send with sequence number: {self.remaining_packets[0].sequence_no}')
                 del self.remaining_packets[0]
             self.bytes_sent = ack_packet.ack_no
             self.available_buffer = ack_packet.sequence_no
@@ -304,16 +289,8 @@ class socket:
 
     def recv(self, nbytes):
 
-        print("\nSize of buffer: " + str(len(self.buffer))
-              + "\nSize of nbytes: " + str(nbytes))
-
         # Keep receiving packets until we have enough data to return
         while len(self.buffer) < nbytes and self.available_buffer > 0:
-
-            print(f'\nTrying to receive a packet' +
-                  f'\nSize of buffer data: {len(self.buffer)}' +
-                  f'\nExpected sequence number: {self.exp_seq_no}' +
-                  f'\nBuffer available: {self.available_buffer}')
 
             # Receive a packet
             packet = self.recv_packet()
@@ -353,7 +330,7 @@ class socket:
             self.first = False
             self.exp_seq_no = 0
 
-        print("data received")
+        print("chunk of data received")
 
         # Returning requested data
         return chunk
@@ -390,7 +367,6 @@ class socket:
                 receive_fin_packet = self.recv_packet()
                 # Stop accepting any packets except an FIN packet
                 if receive_fin_packet.flags != SOCK352_FIN:
-                    print('Received non-FIN packet in connection teardown. Reattempting close')
                     # Wait .3 seconds for the other side to timeout, then reattempt close
                     time.sleep(.3)
                     continue
@@ -406,13 +382,12 @@ class socket:
 
                 break
             except syssock.timeout:
-                print('Timed out on close. Reattempting')
                 # Wait .3 seconds for other socket to timeout, then try again from the top
                 time.sleep(.3)
 
         # Good to close down
         self.udp_socket.close()
-        print('Connection Closed')
+        print('Connection Closed Successfully')
 
         return
 
