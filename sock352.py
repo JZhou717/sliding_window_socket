@@ -359,7 +359,9 @@ class socket:
         # We'll give both sockets .2 seconds to close. If something goes wrong, reattempt both sides to close
         self.udp_socket.settimeout(.2)
 
-        while True:
+        # If we are going above 10 attempts, that means one side already closed while the other is still waiting
+        # We would be stuck waiting forever
+        for x in range(10):
             try:
                 print('Attempting to close connection')
                 # Send FIN
