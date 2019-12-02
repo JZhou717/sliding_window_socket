@@ -61,6 +61,8 @@ class socket:
         self.available_buffer = MAX_BUFFER_SIZE
         # Expected sequence number of the next byte to receive
         self.exp_seq_no = 0
+        # Track if we should ignore update to exp_seq_no for first recv of file size
+        self.first = True
 
         print('sock352 Socket created!')
 
@@ -210,36 +212,43 @@ class socket:
         # List of our threads
         thread_list = []
 
-        # Get a new window size if we can't send a single packet
-        while self.remaining_packets[0].payload_len > self.available_buffer:
+        # We don't check for available window ACK before we send
+        if self.first:
+            self.first = False
+        else:
+            # Get a new window size if we can't send a single packet
             try:
-                packet = self.recv_packet()
-                self.available_buffer = packet.sequence_no
+                print(f'\nChecking for ACK with available buffer')
+                self.recv_ack()
             except syssock.timeout:
+                print('\nTimed out while waiting for buffer size')
                 pass
 
         # index to keep track of the packets we are sending
         index = 0
 
+        print(f'\nPreparing to send packets.')
+
         # Keep sending packets that would fit in the receiver window
-        while self.remaining_packets[index] is not None and \
+        while index < len(self.remaining_packets) and \
                 self.remaining_packets[index].payload_len < self.available_buffer:
             packet = self.remaining_packets[index]
             # If we have timed out. Stop sending packets. Reading in mutex so we are sure of the state
             # send_stream() will be called again when send() sees there are remaining packets
             with mutex:
                 if self.timed_out:
+                    print(f'packet dropped. Timed out on ACK')
                     break
 
             print(f'Sending packet with sequence number: {packet.sequence_no}')
             self.udp_socket.sendto(packet.pack_self(), (self.sending_addr, send_port))
+            # updating the window size with lock just in case one of the threads access it first
+            with mutex:
+                self.available_buffer -= packet.payload_len
             # Create a new thread to start the ACK timer
             ack_thread = Thread(target=self.recv_ack, args=())
             thread_list.append(ack_thread)
             ack_thread.start()
-            # updating the window size with lock just in case one of the threads access it first
-            with mutex:
-                self.available_buffer -= packet.payload_len
 
             index += 1
 
@@ -250,6 +259,7 @@ class socket:
         # Resetting time out flag
         self.timed_out = False
 
+        print('\nEnd of send stream')
         return
 
     # This called every time a packet is sent. Will throw timeout that is caught before send_all_packets
@@ -262,6 +272,7 @@ class socket:
         try:
             ack_packet = self.recv_packet()
         except syssock.timeout:
+            print("ACK thread timed out")
             # Letting socket know we timed out on recv
             with mutex:
                 # Only need to do this if another thread has not already reported timeout
@@ -273,24 +284,39 @@ class socket:
 
         # Locking while we update the list and number of bytes sent and the available window size
         with mutex:
-            if ack_packet.ack_no == self.remaining_packets[0].sequence_no + MAX_PACKET_SIZE:
+            while len(self.remaining_packets) > 0 and ack_packet.ack_no > self.remaining_packets[0].sequence_no:
+                print(f'Removing packet from list of packets to send with sequence number: {self.remaining_packets[0].sequence_no}')
                 del self.remaining_packets[0]
-                self.bytes_sent = ack_packet.ack_no
+            self.bytes_sent = ack_packet.ack_no
             self.available_buffer = ack_packet.sequence_no
-        print(f'Received ACK for {self.bytes_sent} bytes')
+            print(f'Received ACK for {self.bytes_sent} bytes. Buffer has {self.available_buffer} bytes available')
+
         return
 
     def recv(self, nbytes):
 
-        while len(self.buffer) < nbytes:
+        print("\nSize of buffer: " + str(len(self.buffer))
+              + "\nSize of nbytes: " + str(nbytes))
+
+        # Keep receiving packets until we have enough data to return
+        while len(self.buffer) < nbytes and self.available_buffer > 0:
+
+            print(f'\nTrying to receive a packet' +
+                  f'\nSize of buffer data: {len(self.buffer)}' +
+                  f'\nExpected sequence number: {self.exp_seq_no}' +
+                  f'\nBuffer available: {len(self.available_buffer)}')
+
             # Receive a packet
             packet = self.recv_packet()
             # Check if this is the packet we are expecting or if we dropped one
             if packet.sequence_no == self.exp_seq_no:
-                print(f'Received packet with sequence number: {packet.sequence_no}')
-
-                # Increase the expected sequence number to be the next expected sequence number. Also the ack no
-                self.exp_seq_no += packet.payload_len
+                print(f'\nReceived packet with sequence number: {packet.sequence_no} and size: {packet.payload_len}\n')
+                # Don't update the expected sequence number when receiving file size
+                if self.first:
+                    self.first = False
+                else:
+                    # Increase the expected sequence number to be the next expected sequence number. Also the ack no
+                    self.exp_seq_no += packet.payload_len
                 # Add packet payload to our buffer
                 self.buffer += packet.data
                 # Decrease the size that we have in the buffer
@@ -303,13 +329,20 @@ class socket:
                 self.udp_socket.sendto(ack_packet, (self.sending_addr, send_port))
 
         # Taking chunk of requested data to return
-        chunk = self.buffer[:nbytes]
-        self.buffer = self.buffer[nbytes:]
-        self.available_buffer += nbytes
+        if len(self.buffer) < nbytes:
+            chunk = self.buffer
+            self.buffer = b''
+            self.available_buffer += len(chunk)
+        else:
+            chunk = self.buffer[:nbytes]
+            self.buffer = self.buffer[nbytes:]
+            self.available_buffer += nbytes
 
         # Send ack with updated window size
-        window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, self.exp_seq_no, 0, b'').pack_self()
+        window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, 0, 0, b'').pack_self()
         self.udp_socket.sendto(window_ack_packet, (self.sending_addr, send_port))
+
+        print("data received")
 
         # Returning requested data
         return chunk
