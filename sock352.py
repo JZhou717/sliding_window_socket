@@ -196,7 +196,7 @@ class socket:
             # Increment the seq for the next packet, and decrement the remaining bytes to send
             packet_seq_no += len(segment)
             remainder -= len(segment)
-            print(f'File segment {new_packet.sequence_no} created')
+            print(f'File segment {new_packet.sequence_no} created with size: {new_packet.payload_len}')
 
         # Keep sending streams of remaining packets until none left
         # Streams will not send until there is room in the receiving buffer
@@ -304,19 +304,16 @@ class socket:
             print(f'\nTrying to receive a packet' +
                   f'\nSize of buffer data: {len(self.buffer)}' +
                   f'\nExpected sequence number: {self.exp_seq_no}' +
-                  f'\nBuffer available: {len(self.available_buffer)}')
+                  f'\nBuffer available: {self.available_buffer}')
 
             # Receive a packet
             packet = self.recv_packet()
             # Check if this is the packet we are expecting or if we dropped one
             if packet.sequence_no == self.exp_seq_no:
                 print(f'\nReceived packet with sequence number: {packet.sequence_no} and size: {packet.payload_len}\n')
-                # Don't update the expected sequence number when receiving file size
-                if self.first:
-                    self.first = False
-                else:
-                    # Increase the expected sequence number to be the next expected sequence number. Also the ack no
-                    self.exp_seq_no += packet.payload_len
+
+                # Increase the expected sequence number to be the next expected sequence number. Also the ack no
+                self.exp_seq_no += packet.payload_len
                 # Add packet payload to our buffer
                 self.buffer += packet.data
                 # Decrease the size that we have in the buffer
@@ -341,6 +338,11 @@ class socket:
         # Send ack with updated window size
         window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, 0, 0, b'').pack_self()
         self.udp_socket.sendto(window_ack_packet, (self.sending_addr, send_port))
+
+        # Must reset the expected sequence number after sending file size
+        if self.first:
+            self.first = False
+            self.exp_seq_no = 0
 
         print("data received")
 
