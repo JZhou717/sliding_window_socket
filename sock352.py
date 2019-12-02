@@ -3,6 +3,7 @@
 import socket as syssock
 import struct
 import random
+import time
 from threading import Thread, Lock
 
 
@@ -203,6 +204,14 @@ class socket:
         while len(self.remaining_packets) > 0:
             self.send_stream()
 
+        # We want to clear out the link for the final ACK for new window size before next call
+        try:
+            print(f'\nChecking for ACK with available buffer')
+            self.recv_ack()
+        except syssock.timeout:
+            print('\nTimed out while waiting for buffer size')
+            pass
+
         return self.bytes_sent
 
     # Sends packets that will fit in the window
@@ -364,100 +373,48 @@ class socket:
         return Packet(flags, sequence_no, ack_no, payload_len, data)
 
     # Two way double handshake to tear this bad boy down
+    # Each side sends FIN, receives FIN, sends ACK, receive ACK
     def close(self):  # fill in your code here
 
-        # We'll give the sockets 2 seconds to close. If something goes wrong, reattempt both sides to close
-        self.udp_socket.settimeout(2)
+        # We'll give both sockets .2 seconds to close. If something goes wrong, reattempt both sides to close
+        self.udp_socket.settimeout(.2)
 
-        # Each side does a single handshake. Send FIN and receive ACK
-        # Close behaves differently for active close and passive close
-        server_closed = False
-        client_closed = False
-
-        while (not server_closed) and (not client_closed):
+        while True:
             try:
-                # This is only true as the server. Server is passive close
-                if self.server_connected:
-                    server_closed = self.passive_close()
-                else:
-                    client_closed = self.active_close()
+                # Send FIN
+                seq_no = random.randint(0, 100)
+                send_fin_packet = Packet(SOCK352_FIN, seq_no, 0, 0, b'').pack_self()
+                self.udp_socket.sendto(send_fin_packet, (self.sending_addr, send_port))
+
+                # Receive FIN
+                receive_fin_packet = self.recv_packet()
+                # Stop accepting any packets except an FIN packet
+                if receive_fin_packet.flags != SOCK352_FIN:
+                    print('Received non-FIN packet in connection teardown. Reattempting close')
+                    # Wait .3 seconds for the other side to timeout, then reattempt close
+                    time.sleep(.3)
+                    continue
+
+                # Send ACK
+                send_ack_packet = Packet(SOCK352_ACK, 0, (receive_fin_packet.sequence_no + 1), 0, b'').pack_self()
+                self.udp_socket.sendto(send_ack_packet, (self.sending_addr, send_port))
+
+                # Receive ACK
+                # At this point, even if something went wrong, the other socket closed
+                # No point checking values of this ack packet
+                receive_ack_packet = self.recv_packet()
+
+                break
             except syssock.timeout:
-                print('Sockets timed out during close. Reattempting close')
-                pass
+                print('Timed out on close. Reattempting')
+                # Wait .3 seconds for other socket to timeout, then try again from the top
+                time.sleep(.3)
 
         # Good to close down
         self.udp_socket.close()
         print('Connection Closed')
 
         return
-
-    # Active close is the one who first initiates the close. It is the client in the case of sock352
-    def active_close(self):
-
-        # Send FIN
-        seq_no = random.randint(0, 100)
-        fin_packet = Packet(SOCK352_FIN, seq_no, 0, 0, b'').pack_self()
-        self.udp_socket.sendto(fin_packet, (self.sending_addr, send_port))
-
-        # Receive ACK
-        # If we receive anything except what we expect. We have to reattempt
-        try:
-            other_ack_packet = self.recv_packet()
-            if other_ack_packet.ack_no != (seq_no + 1):
-                print('Invalid ACK received in connection teardown. Reattempting close')
-                return False
-
-            # Receive FIN
-            other_fin_packet = self.recv_packet()
-            # Stop accepting any packets except an FIN packet
-            if other_fin_packet.flags != SOCK352_FIN:
-                print('Received non-FIN packet in connection teardown. Reattempting close')
-                return False
-        except TypeError:
-            print('Received unexpected value in connection teardown. Reattempting close')
-            return False
-
-        # Send ACK
-        ack_packet = Packet(SOCK352_ACK, 0, (other_fin_packet.sequence_no + 1), 0, b'').pack_self()
-        self.udp_socket.sendto(ack_packet, (self.sending_addr, send_port))
-
-        # Successful close on client side
-        return True
-
-    # Passive close is the one who first receives the FIN. It is the server in the case of sock352
-    def passive_close(self):
-
-        # Receive FIN
-        # If we receive anything but what we expect, something went wrong. Reattempt
-        try:
-            other_fin_packet = self.recv_packet()
-            if other_fin_packet.flags != SOCK352_FIN:
-                print('Received non-FIN packet in connection teardown. Reattempting close')
-                return False
-        except TypeError:
-            print('Received unexpected value in connection teardown. Reattempting close')
-            return False
-
-        # Send ACK
-        ack_packet = Packet(SOCK352_ACK, 0, (other_fin_packet.sequence_no + 1), 0, b'').pack_self()
-        self.udp_socket.sendto(ack_packet, (self.sending_addr, send_port))
-
-        # Send FIN
-        seq_no = random.randint(0, 100)
-        fin_packet = Packet(SOCK352_FIN, seq_no, 0, 0, b'').pack_self()
-        self.udp_socket.sendto(fin_packet, (self.sending_addr, send_port))
-
-        # Receive ACK
-        # Ths time, since client already sent its final message and we can no longer communicate. Just close
-        try:
-            other_ack_packet = self.recv_packet()
-            if other_ack_packet.ack_no != (seq_no + 1):
-                print('Invalid final ACK received in connection teardown.')
-        except TypeError:
-            print('Received unexpected value in connection teardown.')
-
-        # Successful close on server side
-        return True
 
 
 # For our packet class, we need all the header fields
