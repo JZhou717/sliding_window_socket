@@ -209,6 +209,9 @@ class socket:
     # Sends packets that will fit in the window
     def send_stream(self):
 
+        if len(self.remaining_packets) <= 0:
+            return
+
         # List of our threads
         thread_list = []
 
@@ -218,14 +221,13 @@ class socket:
         else:
             # Get a new window size if we can't send a single packet
             try:
-                self.recv_ack()
+                ack_packet = self.recv_packet()
+                self.available_buffer = ack_packet.sequence_no
             except syssock.timeout:
                 pass
 
         # index to keep track of the packets we are sending
         index = 0
-
-        print(f'\nPreparing to send packets.')
 
         # Keep sending packets that would fit in the receiver window
         while index < len(self.remaining_packets) and \
@@ -272,8 +274,10 @@ class socket:
             with mutex:
                 # Only need to do this if another thread has not already reported timeout
                 if self.timed_out is False:
-                    print('Socket timed out. Resending remaining unacked packets')
+                    print('Recv timed out. Packet dropped')
                     self.timed_out = True
+                # Since we timed out, we can say that the packet we sent didn't fill up the receiving buffer
+                self.available_buffer += MAX_PACKET_SIZE
             # Ending this thread
             return
 
@@ -322,15 +326,14 @@ class socket:
             self.available_buffer += nbytes
 
         # Send ack with updated window size
-        window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, 0, 0, b'').pack_self()
+        print(f'Sending ack with new available buffer: {self.available_buffer}')
+        window_ack_packet = Packet(SOCK352_ACK, self.available_buffer, self.exp_seq_no, 0, b'').pack_self()
         self.udp_socket.sendto(window_ack_packet, (self.sending_addr, send_port))
 
         # Must reset the expected sequence number after sending file size
         if self.first:
             self.first = False
             self.exp_seq_no = 0
-
-        print("chunk of data received")
 
         # Returning requested data
         return chunk
@@ -358,6 +361,7 @@ class socket:
 
         while True:
             try:
+                print('Attempting to close connection')
                 # Send FIN
                 seq_no = random.randint(0, 100)
                 send_fin_packet = Packet(SOCK352_FIN, seq_no, 0, 0, b'').pack_self()
